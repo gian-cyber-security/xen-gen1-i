@@ -12,6 +12,12 @@ XEN-GEN1-I is the **image generation model** in the XEN family. It is designed f
 - Train on your own image + caption dataset
 - Generate PNG images locally
 
+## Supported platforms
+
+- Windows
+- Linux
+- macOS
+
 ## Requirements
 
 Recommended development hardware:
@@ -22,20 +28,23 @@ Recommended development hardware:
 - Python 3.10+
 - PyTorch 2.4+
 
-Install:
+### Windows
 
-```bash
+```powershell
 python -m venv .venv
 .venv\\Scripts\\activate
 pip install -r requirements.txt
 ```
 
-On Linux/macOS:
+### Linux / macOS
 
 ```bash
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
+
+If your system uses `python` for Python 3, you can use `python` instead of `python3`.
 
 ## Generate an image
 
