@@ -6,6 +6,7 @@ from PIL import Image
 from model.tokenizer import XENTokenizer
 from model.image_model import XENImageModel
 from model.image_conditioner import XENImageTextEncoder
+from tools.prompt_search import enrich_prompt
 def ab(t): return torch.cos(((t.float()/999)+.008)/1.008*math.pi/2).pow(2).clamp(1e-4,.9999)
 def load_image(path,size,device):
  im=Image.open(path).convert("RGB").resize((size,size))
@@ -22,7 +23,9 @@ def main():
  p.add_argument("--size",type=int,default=256)
  p.add_argument("--steps",type=int,default=50)
  p.add_argument("--seed",type=int,default=42)
+ p.add_argument("--web-search",action="store_true"); p.add_argument("--no-web-search",action="store_true")
  a=p.parse_args()
+ if a.web_search and not a.no_web_search: a.prompt=enrich_prompt(a.prompt)
  if not 0.05<=a.strength<=1.0: raise ValueError("--strength must be between 0.05 and 1.0")
  d=torch.device("cuda" if torch.cuda.is_available() else "cpu")
  z=torch.load(Path(a.model_dir)/"model.pt",map_location=d,weights_only=False)
