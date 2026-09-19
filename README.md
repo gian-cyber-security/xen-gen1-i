@@ -6,6 +6,8 @@ XEN-GEN1-I is the **image generation model** in the XEN family. It is designed f
 
 - Text-to-image generation
 - Prompt-conditioned image generation
+- Image-to-image editing with a reference image
+- Adjustable edit strength
 - Local CUDA/CPU inference
 - Train on your own image + caption dataset
 - Generate PNG images locally
