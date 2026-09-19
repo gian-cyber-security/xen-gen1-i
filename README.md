@@ -1,3 +1,16 @@
+---
+license: mit
+library_name: pytorch
+pipeline_tag: text-to-image
+language:
+  - en
+tags:
+  - xens
+  - xen
+  - pytorch
+  - custom-architecture
+---
+
 # XEN-GEN1-I
 
 XEN-GEN1-I is the **image generation model** in the XEN family. It is designed for local text-to-image generation using a small conditional diffusion model trained from scratch.
