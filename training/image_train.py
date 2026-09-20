@@ -8,21 +8,72 @@ from torch.utils.data import Dataset,DataLoader
 from model.image_model import XENImageModel
 from model.image_conditioner import XENImageTextEncoder
 from model.tokenizer import XENTokenizer
+
 class DS(Dataset):
- def __init__(self,p,t,s):
-  self.rows=[(x["image"],x["caption"]) for x in map(json.loads,open(p,encoding="utf-8")) if x]; self.t=t; self.s=s
- def __len__(self): return len(self.rows)
- def __getitem__(self,i):
-  p,c=self.rows[i]; im=Image.open(p).convert("RGB").resize((self.s,self.s)); x=torch.from_numpy(np.asarray(im)).permute(2,0,1).float()/127.5-1; return x,torch.tensor(self.t.encode(c,max_length=256))
+    def __init__(self,p,t,s):
+        self.rows=[(x["image"],x["caption"]) for x in map(json.loads,open(p,encoding="utf-8")) if x]
+        if not self.rows: raise ValueError("Dataset is empty")
+        self.t=t; self.s=s
+    def __len__(self): return len(self.rows)
+    def __getitem__(self,i):
+        p,c=self.rows[i]
+        im=Image.open(p).convert("RGB").resize((self.s,self.s))
+        x=torch.from_numpy(np.asarray(im)).permute(2,0,1).float()/127.5-1
+        return x,torch.tensor(self.t.encode(c,max_length=256),dtype=torch.long)
+
 def collate(b):
- m=max(x[1].numel() for x in b); return torch.stack([x[0] for x in b]),torch.stack([F.pad(x[1],(0,m-x[1].numel())) for x in b])
+    m=max(x[1].numel() for x in b)
+    return torch.stack([x[0] for x in b]),torch.stack([F.pad(x[1],(0,m-x[1].numel())) for x in b])
+
+def update_ema(ema,model,decay):
+    with torch.no_grad():
+        for e,p in zip(ema.parameters(),model.parameters()):
+            e.mul_(decay).add_(p,alpha=1-decay)
+
 def main():
- p=argparse.ArgumentParser(); p.add_argument("--data",default="datasets/image_data.jsonl"); p.add_argument("--output",default="outputs/xen-gen1-i"); p.add_argument("--size",type=int,default=256); p.add_argument("--batch-size",type=int,default=2); p.add_argument("--lr",type=float,default=2e-4); p.add_argument("--steps",type=int,default=10000); a=p.parse_args()
- t=XENTokenizer(); t.fit(); ds=DS(a.data,t,a.size); dl=DataLoader(ds,batch_size=a.batch_size,shuffle=True); d=torch.device("cuda" if torch.cuda.is_available() else "cpu"); m=XENImageModel().to(d); c=XENImageTextEncoder().to(d); ps=list(m.parameters())+list(c.parameters()); o=torch.optim.AdamW(ps,lr=a.lr,weight_decay=.01); out=Path(a.output); out.mkdir(parents=True,exist_ok=True); t.save(out/"tokenizer.json"); step=0
- while step<a.steps:
-  for im,ids in dl:
-   im,ids=im.to(d),ids.to(d); n=torch.randn_like(im); tt=torch.randint(0,1000,(im.shape[0],),device=d); ab=torch.cos(((tt.float()/999)+.008)/1.008*torch.pi/2).pow(2).clamp(1e-4,.9999)[:,None,None,None]; pred=m(ab.sqrt()*im+(1-ab).sqrt()*n,tt,c(ids)); loss=F.mse_loss(pred,n); o.zero_grad(); loss.backward(); torch.nn.utils.clip_grad_norm_(ps,1); o.step(); step+=1
-   if step%20==0: print(f"step={step} loss={loss.item():.5f}")
-   if step>=a.steps: break
- torch.save({"model":m.state_dict(),"conditioner":c.state_dict(),"size":a.size},""+str(out/"model.pt"))
+    p=argparse.ArgumentParser()
+    p.add_argument("--data",default="datasets/image_data.jsonl"); p.add_argument("--output",default="outputs/xen-gen1-i")
+    p.add_argument("--size",type=int,default=256); p.add_argument("--batch-size",type=int,default=2)
+    p.add_argument("--lr",type=float,default=2e-4); p.add_argument("--steps",type=int,default=20000)
+    p.add_argument("--grad-accumulation",type=int,default=4); p.add_argument("--save-every",type=int,default=500)
+    p.add_argument("--resume",default=None); p.add_argument("--ema-decay",type=float,default=0.999)
+    a=p.parse_args()
+    random.seed(42); torch.manual_seed(42)
+    if torch.cuda.is_available(): torch.cuda.manual_seed_all(42)
+    t=XENTokenizer(); t.fit(); dl=DataLoader(DS(a.data,t,a.size),batch_size=a.batch_size,shuffle=True,collate_fn=collate)
+    d=torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    m=XENImageModel().to(d); c=XENImageTextEncoder().to(d)
+    ema=XENImageModel().to(d); ema.load_state_dict(m.state_dict()); ema.eval()
+    ps=list(m.parameters())+list(c.parameters()); opt=torch.optim.AdamW(ps,lr=a.lr,weight_decay=.01,betas=(0.9,0.99))
+    scaler=torch.amp.GradScaler("cuda",enabled=d.type=="cuda")
+    out=Path(a.output); out.mkdir(parents=True,exist_ok=True); t.save(out/"tokenizer.json"); step=0; it=iter(dl)
+    if a.resume:
+        ck=torch.load(a.resume,map_location=d,weights_only=False)
+        m.load_state_dict(ck["model"]); c.load_state_dict(ck["conditioner"])
+        if "ema" in ck: ema.load_state_dict(ck["ema"])
+        if "optimizer" in ck: opt.load_state_dict(ck["optimizer"])
+        if "scaler" in ck and d.type=="cuda": scaler.load_state_dict(ck["scaler"])
+        step=int(ck.get("step",0)); print(f"Resumed from step={step}")
+    m.train(); c.train()
+    while step<a.steps:
+        opt.zero_grad(set_to_none=True); total=0.0
+        for _ in range(max(1,a.grad_accumulation)):
+            try: im,ids=next(it)
+            except StopIteration: it=iter(dl); im,ids=next(it)
+            im,ids=im.to(d,non_blocking=True),ids.to(d,non_blocking=True)
+            tt=torch.randint(0,1000,(im.shape[0],),device=d)
+            ab=torch.cos(((tt.float()/999)+.008)/1.008*torch.pi/2).pow(2).clamp(1e-4,.9999)[:,None,None,None]
+            with torch.autocast(device_type=d.type,dtype=torch.float16,enabled=d.type=="cuda"):
+                n=torch.randn_like(im); noisy=ab.sqrt()*im+(1-ab).sqrt()*n
+                pred=m(noisy,tt,c(ids)); loss=F.mse_loss(pred,n)/max(1,a.grad_accumulation)
+            scaler.scale(loss).backward(); total+=loss.item()*max(1,a.grad_accumulation)
+        scaler.unscale_(opt); torch.nn.utils.clip_grad_norm_(ps,1.0); scaler.step(opt); scaler.update()
+        update_ema(ema,m,a.ema_decay); step+=1
+        if step%20==0: print(f"step={step} loss={total/max(1,a.grad_accumulation):.5f}")
+        if step%a.save_every==0:
+            torch.save({"model":m.state_dict(),"ema":ema.state_dict(),"conditioner":c.state_dict(),"optimizer":opt.state_dict(),"scaler":scaler.state_dict(),"step":step,"size":a.size},out/f"checkpoint-{step}.pt")
+            print(f"checkpoint saved: step={step}")
+    torch.save({"model":ema.state_dict(),"conditioner":c.state_dict(),"optimizer":opt.state_dict(),"step":step,"size":a.size},out/"model.pt")
+    print(f"model saved: {out/'model.pt'}")
+
 if __name__=="__main__": main()
